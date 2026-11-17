@@ -1,5 +1,7 @@
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Xml;
+using System.Xml.Linq;
 using System.Xml.Schema;
 
 namespace XML_FAB.Services;
@@ -8,6 +10,46 @@ public sealed record XmlValidationResult(bool IsValid, IReadOnlyList<string> Mes
 
 public sealed class XmlSchemaValidationService
 {
+    private static readonly IReadOnlyDictionary<string, string> FieldNames = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["ExplanatoryNoteNumber"] = "Шифр пояснительной записки",
+        ["ExplanatoryNoteYear"] = "Год составления пояснительной записки",
+        ["ModificationNumber"] = "Номер изменения",
+        ["ModificationDate"] = "Дата изменения",
+        ["ModificationNote"] = "Описание изменения",
+        ["FullName"] = "Полное наименование организации",
+        ["AbbreviatedName"] = "Сокращённое наименование организации",
+        ["OGRN"] = "ОГРН",
+        ["INN"] = "ИНН",
+        ["KPP"] = "КПП",
+        ["NOPRIZNumber"] = "Номер в НОПРИЗ",
+        ["Surname"] = "Фамилия",
+        ["Name"] = "Наименование",
+        ["Patronymic"] = "Отчество",
+        ["SNILS"] = "СНИЛС",
+        ["RegionCode"] = "Код региона",
+        ["OKTMOCode"] = "Код ОКТМО",
+        ["OKTMOName"] = "Наименование ОКТМО",
+        ["City"] = "Город",
+        ["Street"] = "Улица",
+        ["Building"] = "Дом",
+        ["Room"] = "Помещение",
+        ["DocType"] = "Тип документа",
+        ["DocName"] = "Наименование документа",
+        ["DocNumber"] = "Номер документа",
+        ["DocDate"] = "Дата документа",
+        ["DocIssueAuthor"] = "Организация, выдавшая документ",
+        ["DataDescription"] = "Описание дополнительных данных",
+        ["FileName"] = "Имя файла",
+        ["FileFormat"] = "Формат файла",
+        ["FileChecksum"] = "Контрольная сумма файла",
+        ["FinanceComment"] = "Комментарий об источниках финансирования",
+        ["ConstructionType"] = "Вид работ",
+        ["ObjectID"] = "Идентификатор объекта",
+        ["SchemaVersion"] = "Версия схемы",
+        ["AccessRestriction"] = "Гриф ограничения доступа"
+    };
+
     public XmlValidationResult Validate(string xmlPath, string schemaPath)
     {
         var messages = new List<string>();
@@ -16,6 +58,10 @@ public sealed class XmlSchemaValidationService
 
         try
         {
+            // Сохраняем информацию о строках, чтобы связать сообщение валидатора
+            // с конкретным элементом и показать введённое в него значение.
+            var document = XDocument.Load(xmlPath, LoadOptions.SetLineInfo);
+
             var schemas = new XmlSchemaSet { XmlResolver = null };
             schemas.ValidationEventHandler += (_, args) =>
             {
@@ -40,7 +86,7 @@ public sealed class XmlSchemaValidationService
             settings.ValidationFlags |= XmlSchemaValidationFlags.ReportValidationWarnings;
             settings.ValidationEventHandler += (_, args) =>
             {
-                messages.Add(Format(args));
+                messages.Add(Format(args, document));
                 if (args.Severity == XmlSeverityType.Error)
                     documentHasErrors = true;
             };
@@ -52,30 +98,83 @@ public sealed class XmlSchemaValidationService
         }
         catch (XmlException ex)
         {
-            messages.Add($"Ошибка XML (строка {ex.LineNumber}, позиция {ex.LinePosition}): {ex.Message}");
+            messages.Add($"Ошибка XML (строка {ex.LineNumber}, позиция {ex.LinePosition}): документ содержит синтаксическую ошибку.");
         }
         catch (XmlSchemaException ex)
         {
-            messages.Add($"Ошибка XSD (строка {ex.LineNumber}, позиция {ex.LinePosition}): {ex.Message}");
+            messages.Add($"Ошибка XSD (строка {ex.LineNumber}, позиция {ex.LinePosition}): схема содержит ошибку.");
         }
-        catch (IOException ex)
+        catch (IOException)
         {
-            messages.Add($"Ошибка чтения файла: {ex.Message}");
+            messages.Add("Ошибка чтения файла XML или XSD. Проверьте путь и доступность файла.");
         }
-        catch (UnauthorizedAccessException ex)
+        catch (UnauthorizedAccessException)
         {
-            messages.Add($"Нет доступа к файлу: {ex.Message}");
+            messages.Add("Нет доступа к файлу XML или XSD. Проверьте права доступа.");
         }
 
         return new XmlValidationResult(false, messages);
     }
 
-    private static string Format(ValidationEventArgs args)
+    private static string Format(ValidationEventArgs args, XDocument? document = null)
     {
         var prefix = args.Severity == XmlSeverityType.Error ? "Ошибка" : "Предупреждение";
-        var line = args.Exception is { LineNumber: > 0 } ex
-            ? $" (строка {ex.LineNumber}, позиция {ex.LinePosition})"
+        var exception = args.Exception;
+        var line = exception is { LineNumber: > 0 }
+            ? $" (строка {exception.LineNumber}, позиция {exception.LinePosition})"
             : string.Empty;
-        return $"{prefix}{line}: {args.Message}";
+        var field = exception is { LineNumber: > 0 }
+            ? FindFieldAtLine(document, exception.LineNumber)
+            : null;
+
+        if (field is not null)
+        {
+            var valueText = string.IsNullOrWhiteSpace(field.Value)
+                ? "значение не указано"
+                : $"введено: «{field.Value.Trim()}»";
+            return $"{prefix}{line}: поле «{DisplayFieldName(field.Name)}» — {valueText}. Значение или структура XML не соответствует требованиям схемы.";
+        }
+
+        return $"{prefix}{line}: XML-документ или схема не соответствуют требованиям проверки.";
+    }
+
+    private static (string Name, string Value)? FindFieldAtLine(XDocument? document, int lineNumber)
+    {
+        if (document?.Root is null)
+            return null;
+
+        var elementsOnLine = document.Root
+            .DescendantsAndSelf()
+            .Where(element => ((IXmlLineInfo)element).HasLineInfo() && ((IXmlLineInfo)element).LineNumber == lineNumber)
+            .OrderByDescending(GetDepth)
+            .ToList();
+
+        foreach (var element in elementsOnLine)
+        {
+            var attribute = element.Attributes().FirstOrDefault(candidate =>
+                ((IXmlLineInfo)candidate).HasLineInfo() && ((IXmlLineInfo)candidate).LineNumber == lineNumber);
+            if (attribute is not null)
+                return (attribute.Name.LocalName, attribute.Value);
+        }
+
+        var fieldElement = elementsOnLine.FirstOrDefault(element => !string.IsNullOrWhiteSpace(element.Value))
+            ?? elementsOnLine.FirstOrDefault();
+        return fieldElement is null ? null : (fieldElement.Name.LocalName, fieldElement.Value);
+    }
+
+    private static int GetDepth(XElement element)
+    {
+        var depth = 0;
+        for (var parent = element.Parent; parent is not null; parent = parent.Parent)
+            depth++;
+        return depth;
+    }
+
+    private static string DisplayFieldName(string xmlName)
+    {
+        if (FieldNames.TryGetValue(xmlName, out var displayName))
+            return displayName;
+
+        return Regex.Replace(xmlName, "(?<=[a-z0-9])(?=[A-Z])", " ");
     }
 }
