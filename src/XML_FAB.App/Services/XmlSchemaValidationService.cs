@@ -129,10 +129,11 @@ public sealed class XmlSchemaValidationService
 
         if (field is not null)
         {
-            var valueText = string.IsNullOrWhiteSpace(field.Value)
+            var fieldInfo = field.Value;
+            var valueText = string.IsNullOrWhiteSpace(fieldInfo.Value)
                 ? "значение не указано"
-                : $"введено: «{field.Value.Trim()}»";
-            return $"{prefix}{line}: поле «{DisplayFieldName(field.Name)}» ({field.Name}) — {valueText}. Проверьте формат и допустимое значение поля по требованиям схемы.";
+                : $"введено: «{fieldInfo.Value.Trim()}»";
+            return $"{prefix}{line}: поле «{DisplayFieldName(fieldInfo.Name)}» ({fieldInfo.Name}) — {valueText}. Проверьте формат и допустимое значение поля по требованиям схемы.";
         }
 
         return $"{prefix}{line}: XML-документ или схема не соответствуют требованиям проверки.";
