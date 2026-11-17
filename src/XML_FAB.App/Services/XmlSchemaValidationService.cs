@@ -132,7 +132,7 @@ public sealed class XmlSchemaValidationService
             var valueText = string.IsNullOrWhiteSpace(field.Value)
                 ? "значение не указано"
                 : $"введено: «{field.Value.Trim()}»";
-            return $"{prefix}{line}: поле «{DisplayFieldName(field.Name)}» — {valueText}. Значение или структура XML не соответствует требованиям схемы.";
+            return $"{prefix}{line}: поле «{DisplayFieldName(field.Name)}» ({field.Name}) — {valueText}. Проверьте формат и допустимое значение поля по требованиям схемы.";
         }
 
         return $"{prefix}{line}: XML-документ или схема не соответствуют требованиям проверки.";
@@ -143,9 +143,26 @@ public sealed class XmlSchemaValidationService
         if (document?.Root is null)
             return null;
 
-        var elementsOnLine = document.Root
+        var elements = document.Root
             .DescendantsAndSelf()
-            .Where(element => ((IXmlLineInfo)element).HasLineInfo() && ((IXmlLineInfo)element).LineNumber == lineNumber)
+            .Select(element => new
+            {
+                Element = element,
+                Line = ((IXmlLineInfo)element).HasLineInfo() ? ((IXmlLineInfo)element).LineNumber : 0
+            })
+            .Where(item => item.Line > 0 && item.Line <= lineNumber)
+            .ToList();
+
+        if (elements.Count == 0)
+            return null;
+
+        // Сначала ищем элемент непосредственно на строке ошибки. Если XSD указала
+        // строку внутри многострочного значения — берём ближайшее поле выше по XML.
+        var matchingLine = elements.Max(item => item.Line == lineNumber ? item.Line : 0);
+        var targetLine = matchingLine > 0 ? matchingLine : elements.Max(item => item.Line);
+        var elementsOnLine = elements
+            .Where(item => item.Line == targetLine)
+            .Select(item => item.Element)
             .OrderByDescending(GetDepth)
             .ToList();
 
